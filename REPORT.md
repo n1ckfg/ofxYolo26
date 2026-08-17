@@ -1,8 +1,9 @@
 # ofxYolo26 — build report
 
-Depth, pose and instance segmentation are all implemented, build, and are
-verified against the Python onnxruntime reference. GPU/ANE acceleration is on
-by default via CoreML, worth 2.6x–9.3x.
+All five YOLO26 tasks — object detection, oriented boxes, depth, pose and
+instance segmentation — are implemented, build, and are verified against the
+Python onnxruntime reference. GPU/ANE acceleration is on by default via CoreML,
+worth 2.5x–8.9x.
 
 ## Structure
 
@@ -15,11 +16,14 @@ by default via CoreML, worth 2.6x–9.3x.
 | `ofxYolo26Detection` | `Detection`, per-class NMS, class colours |
 | `ofxYolo26Model` | subclasses `ofxOnnxRuntime::BaseHandler`; session options, IO introspection, ONNX metadata, class names, timing |
 | `ofxYolo26ModelThread` | generic background runner with frame dropping |
+| `ofxYolo26Detector` | `Detector` + `DetectionResult` + `drawDetections()` |
+| `ofxYolo26Obb` | `Obb` + `ObbResult` + `OrientedBox` + `drawOrientedBoxes()` |
 | `ofxYolo26Depth` | `Depth` + `DepthMap` + display helpers |
 | `ofxYolo26Pose` | `Pose` + `PoseResult` + COCO skeleton + `drawPoses()` |
 | `ofxYolo26Segmentation` | `Segmentation` + `SegmentationResult` + `InstanceMask` + overlay helpers |
 
-Examples: `example-depth`, `example-pose`, `example-seg`.
+Examples: `example-detect`, `example-obb`, `example-depth`, `example-pose`,
+`example-seg`.
 
 ## Notable decisions
 
@@ -68,6 +72,27 @@ letterbox preprocessing.
   instance 0's mask 59.3% above alpha 0.5 within its box vs 59.4%. Person-only
   filtering drops the run from 8 to 6 as expected. Rendered masks follow the bus
   silhouettes rather than their boxes.
+- **Detection and OBB** — verified by handing Python the exact tensor the addon
+  built, which removes the image decoder from the comparison. Every value matches
+  to 4 decimals: all 6 detections, and all 3 OBB rows including angles. Feeding
+  the same *image* gives 6 detections against Python's 5, because one box scores
+  0.4157 here and just under 0.4 under PIL's JPEG decoder — the decoder, not the
+  decode. OBB corners are additionally checked geometrically: opposite edges come
+  back exactly `w, h, w, h`, adjacent edges are perpendicular to 1e-7, the corner
+  centroid lands on the reported centre, and the corner heading recovers the
+  reported angle.
+
+Two notes on the OBB layout and model. The reference web app's header comment
+claims the columns are `cx, cy, w, h, angle, score, cls`; its own code — and the
+model's actual output — put score at 4, class at 5 and angle at 6. This port
+follows the measured layout, established by inspecting column ranges (col 5 is
+integer-valued 0..14 for the 15 DOTA classes, col 6 spans ±0.77 radians).
+
+The stock OBB export is trained on DOTA, so its classes are aerial and it finds
+essentially nothing in an ordinary photograph — max score 0.027 on a street
+scene, and 0.014 on a synthetic parking lot built to try to fool it. That is
+correct behaviour, not a broken decode, so `example-obb` accepts a dropped image
+and says so in the footer when it finds nothing.
 
 Residual differences are JPEG decoder noise (FreeImage vs libjpeg) plus that
 one-level preprocessing rounding.
@@ -81,19 +106,21 @@ onnxruntime has no Metal/MPS provider; the Apple path is CoreML. The bundled
 a `Backend` / `CoreMLComputeUnits` option added, defaulting to CoreML with
 automatic CPU fallback.
 
-Median steady-state inference, 640x640:
+Median steady-state inference, 640x640, median of 5 runs:
 
 | task | CPU | CoreML | speedup |
 |---|---|---|---|
-| depth | 85.6 ms | 9.2 ms | 9.3x |
-| pose | 29.1 ms | 11.3 ms | 2.6x |
-| segmentation | 38.2 ms | 8.5 ms | 4.5x |
+| detect | 25.6 ms | 10.2 ms | 2.5x |
+| obb | 25.4 ms | 7.2 ms | 3.5x |
+| depth | 85.2 ms | 9.6 ms | 8.9x |
+| pose | 30.0 ms | 7.8 ms | 3.9x |
+| segmentation | 36.9 ms | 12.8 ms | 2.9x |
 
-Accuracy is not traded away: depth and segmentation agree with CPU to within
-1e-5, and pose keypoints land on the same pixel with a worst-case score
-difference of 4e-5.
+Accuracy is not traded away: every task agrees with its CPU result to within
+1e-5, except pose scores at 4e-5, and keypoints land on the same pixel. CoreML
+timings are bimodal run to run, so these are medians rather than best cases.
 
-Four findings worth recording, none of them predictable from the docs:
+Six findings worth recording, none of them predictable from the docs:
 
 - **`CoreMLComputeUnits::All` beats Neural-Engine-only** — 5.6 ms vs 22.9 ms on
   pose. Operators the ANE refuses fall back to CPU rather than to the GPU, so
@@ -109,6 +136,17 @@ Four findings worth recording, none of them predictable from the docs:
   onnxruntime carries `com.apple.quarantine`; the app then sits at 0% CPU and
   192 KB RSS forever, with no crash and no log. `cp` propagates it to every
   `bin/` copy.
+- **A dynamic input shape costs the whole CoreML speedup.** `yolo26n-obb`
+  declares `[batch, 3, height, width]`, and with the axes free CoreML runs it at
+  CPU speed (23.8 ms vs 23.2 ms). Pinning them with
+  `AddFreeDimensionOverrideByName` takes it to 7.2 ms. Static models ignore the
+  override, so it is safe to apply unconditionally.
+- **onnxruntime's CoreML cache key is the model path, nothing else.** After
+  adding the dimension pinning, OBB started failing every inference with
+  `Feature _model_10_m_m_0_attn_Shape_output_0 is required but not specified` —
+  a stale compiled model from the previous, differently-partitioned session. The
+  cache directory is now per configuration (model, size, compute units, format,
+  plus the file's size and mtime).
 
 Two platform regressions from the upgrade, both documented in the README: the
 1.29.0 macOS build is **arm64-only** (1.10.0 was universal) and requires

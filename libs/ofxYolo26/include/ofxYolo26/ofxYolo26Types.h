@@ -138,6 +138,12 @@ struct Settings {
 	/// Matches `graphOptimizationLevel: "all"` in the reference web app.
 	GraphOptimizationLevel graphOptimizationLevel = ORT_ENABLE_ALL;
 
+	/// Size to run models whose input shape is dynamic at — yolo26n-obb, for
+	/// one, declares [batch, 3, height, width]. 0 takes the size from the
+	/// export's "imgsz" metadata, falling back to 640x640.
+	int dynamicInputWidth = 0;
+	int dynamicInputHeight = 0;
+
 	ResizeMode resizeMode = ResizeMode::Letterbox;
 
 	/// Value written into the letterbox padding, in normalised [0,1] units.

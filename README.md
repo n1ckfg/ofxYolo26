@@ -15,12 +15,11 @@ deliberately not ported; in openFrameworks you already have the pixels.
 
 | task | class | model | example |
 |---|---|---|---|
+| object detection | `ofxYolo26::Detector` | `yolo26n.onnx` | `example-detect` |
+| oriented boxes (OBB) | `ofxYolo26::Obb` | `yolo26n-obb.onnx` | `example-obb` |
 | monocular depth | `ofxYolo26::Depth` | `yolo26n-depth.onnx` | `example-depth` |
 | multi-person pose | `ofxYolo26::Pose` | `yolo26n-pose.onnx` | `example-pose` |
 | instance segmentation | `ofxYolo26::Segmentation` | `yolo26n-seg.onnx` | `example-seg` |
-
-Object detection and OBB share the same plumbing and are the natural next
-additions — their heads are already the simplest case of the pose decoder.
 
 ## Dependencies
 
@@ -37,6 +36,8 @@ addon still builds against it apart from the two API calls noted below.
 Copy the model your project needs into its data folder:
 
 ```
+bin/data/models/yolo26n.onnx
+bin/data/models/yolo26n-obb.onnx
 bin/data/models/yolo26n-depth.onnx
 bin/data/models/yolo26n-pose.onnx
 bin/data/models/yolo26n-seg.onnx
@@ -112,8 +113,21 @@ A few things worth knowing:
   folder) persists the compiled model, which cuts a cold first inference of
   1.9 s to about 60 ms on later launches. Either way, run one throwaway frame
   through the model during setup rather than letting a live source hit it.
-- The cache is keyed on the model path and onnxruntime does **not** notice if
-  the file changed — clear the directory if you replace a model in place.
+- **Dynamic input shapes get pinned.** `yolo26n-obb` declares
+  `[batch, 3, height, width]`, and CoreML cannot do much with a graph whose
+  shapes are unknown — left free it runs at CPU speed (23.8 ms vs 23.2 ms).
+  The addon pins the free axes with `AddFreeDimensionOverrideByName`, which
+  takes it to 7.2 ms. Static models are unaffected; the override is ignored.
+  Size comes from `Settings::dynamicInputWidth/Height`, or the export's `imgsz`
+  metadata, defaulting to 640x640.
+- **The CoreML cache is keyed per configuration.** onnxruntime keys its own
+  cache on the model path alone, so changing anything that alters graph
+  partitioning — input size, compute units, model format — would silently reuse
+  a mismatched compiled model and fail at inference with
+  `Feature ... is required but not specified`. The addon gives each
+  configuration its own subdirectory, named for the model, size, compute units,
+  format, and the model file's size and mtime, so replacing a `.onnx` in place
+  is also handled.
 - `Backend::CUDA` and `Backend::TensorRT` are for platforms where you have
   swapped in a runtime that supports them; the macOS build has neither.
 
@@ -137,6 +151,65 @@ segResult.getBoxInSource(i);
 segResult.getAlphaAtSource(x, y, &instance);
 letterbox.destToSource({dx, dy});   // the general case
 ```
+
+## Object detection
+
+Output is `[1, 300, 6]`: per proposal `x1, y1, x2, y2, score, class`. End2end,
+so decoding is a score threshold and a sort, exactly as `decodeYOLOv26()` does
+in the reference.
+
+```cpp
+ofxYolo26::Detector detector;
+detector.setup("models/yolo26n.onnx");
+detector.setScoreThreshold(0.4f);   // DET_SCORE_T
+detector.setMaxDetections(100);     // DET_TOPK
+detector.setClassFilter({0});       // people only, by COCO id
+
+const ofxYolo26::DetectionResult & result = detector.update(pixels);
+for (size_t i = 0; i < result.size(); i++) {
+    ofRectangle box = result.getBoxInSource(i);
+    result.detections[i].labelName;   // "person", "bus", ...
+}
+
+ofxYolo26::drawDetections(result, frameRect);
+```
+
+## Oriented bounding boxes
+
+Output is `[batch, 300, 7]`: per proposal `cx, cy, w, h, score, class, angle`.
+Note the box is **centre form** here, unlike the detect head's corner form, and
+`angle` is radians in image coordinates (+Y down), so a positive angle turns
+clockwise on screen.
+
+```cpp
+ofxYolo26::Obb obb;
+obb.setup("models/yolo26n-obb.onnx");
+
+const ofxYolo26::ObbResult & result = obb.update(pixels);
+for (size_t i = 0; i < result.size(); i++) {
+    std::array<glm::vec2, 4> corners = result.getCornersInSource(i);
+    glm::vec2 centre = result.getCenterInSource(i);
+    float angle = result.getAngleInSource(i);
+    ofRectangle aabb = result.boxes[i].getBoundingBox();
+}
+
+ofxYolo26::drawOrientedBoxes(result, frameRect);
+```
+
+Two things to know about this model:
+
+- **Its classes are aerial.** The stock export is trained on DOTA: plane, ship,
+  storage tank, harbour, roundabout, large/small vehicle and so on. On an
+  ordinary photograph it scores near zero, which is correct behaviour rather
+  than a broken decode. `example-obb` takes a dropped image so you can try a
+  real aerial or satellite frame.
+- **Its input shape is dynamic** — `[batch, 3, height, width]`, unlike every
+  other export here. The addon pins the free axes at load; see below.
+
+The reference web app's header comment claims the column order is
+`cx, cy, w, h, angle, score, cls`. That is wrong — its own code, and the model's
+actual output, put score at 4, class at 5 and angle at 6. This port follows the
+measured layout.
 
 ## Depth
 
@@ -239,9 +312,15 @@ end up fighting over the same mask pixels. That is ported and on by default.
 
 ## Examples
 
-All three take `space` to switch between a bundled still and the webcam, `d` to
+All five take `space` to switch between a bundled still and the webcam, `d` to
 dump results to the console, and `h` to toggle the help line.
 
+- **example-detect** — boxes and labels. `-`/`=` score threshold, `f` cycles
+  all / people / vehicles, `l` labels. Drop an image on the window to use it.
+- **example-obb** — rotated boxes with a heading spur. `-`/`=` score
+  threshold, `l` labels, `o` heading. Drop an aerial image on the window; the
+  bundled street photo is a stand-in and will show little or nothing, which the
+  footer says explicitly.
 - **example-depth** — depth map beside the frame, mouse probe reading raw depth
   in source coordinates. `c` colour ramp, `i` invert, `x` show/crop padding.
 - **example-pose** — skeletons over the frame. `-`/`=` score threshold,
@@ -252,20 +331,27 @@ dump results to the console, and `h` to toggle the help line.
 
 ## Performance
 
-Median steady-state inference, 640x640, Apple Silicon laptop, onnxruntime
-1.29.0:
+Steady-state inference, 640x640, Apple Silicon laptop, onnxruntime 1.29.0.
+Median of 5 runs, each the median of 10 inferences:
 
 | task | CPU | CoreML | speedup |
 |---|---|---|---|
-| depth | 85.6 ms | 9.2 ms | **9.3x** |
-| pose | 29.1 ms | 11.3 ms | **2.6x** |
-| segmentation | 38.2 ms | 8.5 ms | **4.5x** |
+| detect | 25.6 ms | 10.2 ms | **2.5x** |
+| obb | 25.4 ms | 7.2 ms | **3.5x** |
+| depth | 85.2 ms | 9.6 ms | **8.9x** |
+| pose | 30.0 ms | 7.8 ms | **3.9x** |
+| segmentation | 36.9 ms | 12.8 ms | **2.9x** |
 
-That is roughly 12 → 109 fps for depth, 34 → 88 fps for pose, and 26 → 118 fps
-for segmentation. The threaded runners still matter — 9 ms on the render thread
-is a third of a 30 fps budget — but all three tasks now run comfortably live.
+Every task clears 60 fps on CoreML; depth goes from ~12 fps to ~104. The
+threaded runners still matter, since even 10 ms on the render thread is a third
+of a 30 fps budget.
 
-Session load, with the CoreML cache warm, is about 40–55 ms per model.
+CoreML timings are bimodal run to run — segmentation lands on either ~8.7 ms or
+~12.8 ms depending on how CoreML partitions that session, and the others vary
+similarly. The medians above are honest middles, not best cases.
+
+Session load with the cache warm is about 40–90 ms per model; cold, roughly
+300–380 ms while CoreML compiles.
 
 ## Verification
 
@@ -293,6 +379,27 @@ uint8, where this keeps the box average in float.
 **Segmentation**, on a street scene: same 8 instances, same classes, boxes
 agreeing to ~0.1 px; instance 0's mask covers 59.3% of its box above alpha 0.5
 against Python's 59.4%.
+
+**Detection and OBB** were checked by handing Python the exact tensor the addon
+built, which removes the image decoder from the comparison entirely. Every value
+matches to 4 decimal places — all 6 detections and all 3 OBB rows including
+angles:
+
+```
+detect #0  C++  0.9336 cls5 [279.7271 237.2336 524.2201 396.6292]
+           py   0.9336 cls5 [279.7271 237.2336 524.2201 396.6292]
+obb    #0  C++  0.0225 cls10 c=(326.3159,337.6576) wh=(15.9558,11.6423) ang=0.5287
+           py   0.0225 cls10 c=(326.3159,337.6576) wh=(15.9558,11.6423) ang=0.5287
+```
+
+Feeding the same *image* instead yields 6 detections against Python's 5, because
+one box scores 0.4157 here and just under the 0.4 threshold under PIL's JPEG
+decoder. That is the decoder, not the decode.
+
+The OBB corner maths is checked geometrically as well: opposite edges come back
+exactly `w, h, w, h`, adjacent edges are perpendicular to within 1e-7, the
+corner centroid lands on the reported centre, and the corner heading recovers
+the reported angle.
 
 Remaining differences are JPEG decoder noise (FreeImage vs libjpeg) plus the
 one-level preprocessing rounding above.

@@ -68,13 +68,34 @@ protected:
 	/// Returning false fails the load.
 	virtual bool onLoaded() { return true; }
 
-	/// Applies threading, optimisation and execution-provider settings.
+	/// Applies threading, optimisation and execution-provider settings, pinning
+	/// any free input axis to pinWidth/pinHeight.
 	/// Throws Ort::Exception when the requested provider is unavailable.
 	void configureSessionOptions(Ort::SessionOptions & sessionOptions,
 		Backend backend,
-		const std::string & resolvedPath);
+		const std::string & resolvedPath,
+		int pinWidth,
+		int pinHeight);
+
+	/// Creates the session on the requested backend, falling back to CPU when
+	/// that backend is unavailable and Settings::fallbackToCPU is set.
+	bool createSession(const std::string & path,
+		const std::string & resolved,
+		int pinWidth,
+		int pinHeight);
 
 	static const char * coreMLComputeUnitsString(CoreMLComputeUnits units);
+
+	/// Size and modification time, so a model replaced in place gets a fresh
+	/// CoreML cache entry rather than a stale compiled model.
+	static std::string modelFingerprint(const std::string & resolvedPath);
+
+	/// Pins any dynamic axis of the input to a concrete size and resizes the
+	/// session's input buffer to match. False if no usable size could be found.
+	bool resolveInputShape();
+
+	/// Reads an Ultralytics "imgsz" metadata value ("[640, 640]" or "640").
+	static void parseImgsz(const std::string & imgsz, int & height, int & width);
 
 	Settings settings;
 	std::string modelPath;

@@ -46,6 +46,10 @@ public:
 	const Settings & getSettings() const { return settings; }
 	const std::string & getModelPath() const { return modelPath; }
 
+	/// The backend actually in use, which differs from `settings.backend` when
+	/// the requested one was unavailable and the load fell back to CPU.
+	Backend getActiveBackend() const { return activeBackend; }
+
 	/// Mapping produced by the most recent call to preprocess().
 	const Letterbox & getLetterbox() const { return letterbox; }
 
@@ -64,8 +68,17 @@ protected:
 	/// Returning false fails the load.
 	virtual bool onLoaded() { return true; }
 
+	/// Applies threading, optimisation and execution-provider settings.
+	/// Throws Ort::Exception when the requested provider is unavailable.
+	void configureSessionOptions(Ort::SessionOptions & sessionOptions,
+		Backend backend,
+		const std::string & resolvedPath);
+
+	static const char * coreMLComputeUnitsString(CoreMLComputeUnits units);
+
 	Settings settings;
 	std::string modelPath;
+	Backend activeBackend = Backend::CPU;
 	bool loaded = false;
 
 	int inputWidth = 0;

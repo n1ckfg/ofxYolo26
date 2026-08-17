@@ -1,16 +1,9 @@
 #include "ofxYolo26Model.h"
+#include "coreml_provider_factory.h"
 
 namespace ofxYolo26 {
 
 namespace {
-
-	/// onnxruntime hands back allocator-owned strings that the caller must free.
-	std::string takeOrtString(Ort::AllocatorWithDefaultOptions & allocator, char * raw) {
-		if (raw == nullptr) return std::string();
-		std::string out(raw);
-		allocator.Free(raw);
-		return out;
-	}
 
 	std::string shapeToString(const std::vector<int64_t> & shape) {
 		std::string s = "[";
@@ -23,6 +16,69 @@ namespace {
 
 } // namespace
 
+void Model::configureSessionOptions(Ort::SessionOptions & sessionOptions,
+	Backend backend,
+	const std::string & resolvedPath) {
+
+	sessionOptions.SetGraphOptimizationLevel(settings.graphOptimizationLevel);
+	if (settings.intraOpNumThreads > 0) sessionOptions.SetIntraOpNumThreads(settings.intraOpNumThreads);
+	if (settings.interOpNumThreads > 0) sessionOptions.SetInterOpNumThreads(settings.interOpNumThreads);
+
+	switch (backend) {
+	case Backend::CPU:
+		break;
+
+	case Backend::CoreML: {
+		std::unordered_map<std::string, std::string> options;
+		options[kCoremlProviderOption_MLComputeUnits] = coreMLComputeUnitsString(settings.coreMLComputeUnits);
+		options[kCoremlProviderOption_ModelFormat] = settings.coreMLUseMLProgram ? "MLProgram" : "NeuralNetwork";
+
+		// Every ofxYolo26 export has a static input shape, and telling CoreML so
+		// lets it take subgraphs it would otherwise refuse.
+		options[kCoremlProviderOption_RequireStaticInputShapes] = "1";
+
+		if (!settings.coreMLCacheDirectory.empty()) {
+			const std::string cacheDir = ofToDataPath(settings.coreMLCacheDirectory, true);
+			ofDirectory::createDirectory(cacheDir, false, true);
+			options[kCoremlProviderOption_ModelCacheDirectory] = cacheDir;
+		}
+		sessionOptions.AppendExecutionProvider("CoreML", options);
+		break;
+	}
+
+	case Backend::TensorRT: {
+		OrtTensorRTProviderOptions op;
+		memset(&op, 0, sizeof(op));
+		op.device_id = settings.deviceId;
+		op.trt_fp16_enable = 1;
+		op.trt_engine_cache_enable = 1;
+		std::string cachePath = resolvedPath;
+		ofStringReplace(cachePath, ".onnx", "_trt_cache");
+		op.trt_engine_cache_path = cachePath.c_str();
+		sessionOptions.AppendExecutionProvider_TensorRT(op);
+	}
+		// fall through: TensorRT is layered on top of CUDA
+		[[fallthrough]];
+
+	case Backend::CUDA: {
+		OrtCUDAProviderOptions op;
+		op.device_id = settings.deviceId;
+		sessionOptions.AppendExecutionProvider_CUDA(op);
+		break;
+	}
+	}
+}
+
+const char * Model::coreMLComputeUnitsString(CoreMLComputeUnits units) {
+	switch (units) {
+	case CoreMLComputeUnits::All: return "MLComputeUnitsAll";
+	case CoreMLComputeUnits::CPUAndNeuralEngine: return "MLComputeUnitsCPUAndNeuralEngine";
+	case CoreMLComputeUnits::CPUAndGPU: return "MLComputeUnitsCPUAndGPU";
+	case CoreMLComputeUnits::CPUOnly: return "MLComputeUnitsCPUOnly";
+	}
+	return "MLComputeUnitsAll";
+}
+
 bool Model::load(const std::string & path, const Settings & s) {
 	loaded = false;
 	settings = s;
@@ -34,39 +90,37 @@ bool Model::load(const std::string & path, const Settings & s) {
 		return false;
 	}
 
-	Ort::SessionOptions sessionOptions;
-	sessionOptions.SetGraphOptimizationLevel(settings.graphOptimizationLevel);
-	if (settings.intraOpNumThreads > 0) sessionOptions.SetIntraOpNumThreads(settings.intraOpNumThreads);
-	if (settings.interOpNumThreads > 0) sessionOptions.SetInterOpNumThreads(settings.interOpNumThreads);
-
+	// Requesting a provider the runtime was not built with throws rather than
+	// degrading, so provider setup and session creation share one guard and one
+	// retry on the CPU provider.
+	activeBackend = settings.backend;
 	try {
-		// Requesting a provider the runtime was not built with throws rather than
-		// falling back, so this has to sit inside the same guard as session
-		// creation. The onnxruntime that ships with ofxOnnxRuntime is CPU-only on
-		// macOS, so INFER_CUDA / INFER_TENSORRT will land here.
-		if (settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
-			OrtTensorRTProviderOptions op;
-			memset(&op, 0, sizeof(op));
-			op.device_id = settings.deviceId;
-			op.trt_fp16_enable = 1;
-			op.trt_engine_cache_enable = 1;
-			std::string cachePath = resolved;
-			ofStringReplace(cachePath, ".onnx", "_trt_cache");
-			op.trt_engine_cache_path = cachePath.c_str();
-			sessionOptions.AppendExecutionProvider_TensorRT(op);
-		}
-		if (settings.inferType == ofxOnnxRuntime::INFER_CUDA || settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
-			OrtCUDAProviderOptions op;
-			op.device_id = settings.deviceId;
-			sessionOptions.AppendExecutionProvider_CUDA(op);
-		}
-
+		Ort::SessionOptions sessionOptions;
+		configureSessionOptions(sessionOptions, settings.backend, resolved);
 		// BaseHandler::setup2 creates the session and sizes the input buffer from
 		// the model's declared input shape.
 		setup2(path, sessionOptions);
 	} catch (const Ort::Exception & e) {
-		ofLogError("ofxYolo26::Model") << "failed to create session for " << resolved << ": " << e.what();
-		return false;
+		if (settings.backend == Backend::CPU || !settings.fallbackToCPU) {
+			ofLogError("ofxYolo26::Model") << "failed to create session for " << resolved
+										   << " on " << toString(settings.backend) << ": " << e.what();
+			return false;
+		}
+
+		ofLogWarning("ofxYolo26::Model")
+			<< toString(settings.backend) << " unavailable for " << ofFilePath::getFileName(path)
+			<< " (" << e.what() << "); falling back to CPU";
+
+		activeBackend = Backend::CPU;
+		try {
+			Ort::SessionOptions cpuOptions;
+			configureSessionOptions(cpuOptions, Backend::CPU, resolved);
+			setup2(path, cpuOptions);
+		} catch (const Ort::Exception & e2) {
+			ofLogError("ofxYolo26::Model") << "failed to create session for " << resolved
+										   << " on CPU: " << e2.what();
+			return false;
+		}
 	}
 
 	// YOLO exports are NCHW with a fixed batch of 1.
@@ -108,17 +162,15 @@ void Model::readMetadata() {
 		Ort::AllocatorWithDefaultOptions allocator;
 		Ort::ModelMetadata meta = ort_session->GetModelMetadata();
 
-		int64_t numKeys = 0;
-		char ** keys = meta.GetCustomMetadataMapKeys(allocator, numKeys);
-		if (keys == nullptr) return;
-
-		for (int64_t i = 0; i < numKeys; i++) {
-			const std::string key = takeOrtString(allocator, keys[i]);
+		for (const auto & keyPtr : meta.GetCustomMetadataMapKeysAllocated(allocator)) {
+			if (keyPtr == nullptr) continue;
+			const std::string key(keyPtr.get());
 			if (key.empty()) continue;
+
 			metadataKeys.push_back(key);
-			metadataMap[key] = takeOrtString(allocator, meta.LookupCustomMetadataMap(key.c_str(), allocator));
+			const auto valuePtr = meta.LookupCustomMetadataMapAllocated(key.c_str(), allocator);
+			metadataMap[key] = valuePtr ? std::string(valuePtr.get()) : std::string();
 		}
-		allocator.Free(keys);
 	} catch (const Ort::Exception & e) {
 		ofLogVerbose("ofxYolo26::Model") << "could not read model metadata: " << e.what();
 	}
@@ -181,6 +233,7 @@ std::string Model::getClassName(int label) const {
 void Model::logModelInfo() const {
 	ofLogNotice("ofxYolo26::Model") << ofFilePath::getFileName(modelPath)
 									<< " task=" << getMetadata("task")
+									<< " backend=" << toString(activeBackend)
 									<< " input " << getInputName() << " " << shapeToString(input_node_dims);
 	for (int i = 0; i < num_outputs; i++) {
 		ofLogNotice("ofxYolo26::Model") << "  output " << i << " " << getOutputName(i)

@@ -58,13 +58,62 @@ struct Letterbox {
 	ofRectangle getContentRect() const;
 };
 
+/// Execution provider to run inference on.
+///
+/// onnxruntime has no Metal or MPS provider; on Apple hardware the accelerated
+/// path is CoreML, which dispatches each supported subgraph to the Neural
+/// Engine, the GPU or the CPU as CoreML sees fit.
+enum class Backend {
+	CPU,
+	CoreML,
+	CUDA,
+	TensorRT
+};
+
+/// Which processors CoreML is allowed to use. `All` lets CoreML choose, which
+/// in practice means the Neural Engine for most of a YOLO graph.
+///
+/// Note that the Neural Engine computes in fp16. If you need results that match
+/// the CPU provider bit for bit, use CPUAndGPU or the CPU backend.
+enum class CoreMLComputeUnits {
+	All,
+	CPUAndNeuralEngine,
+	CPUAndGPU,
+	CPUOnly
+};
+
+/// CoreML where the runtime provides it, CPU otherwise.
+Backend getDefaultBackend();
+
+const char * toString(Backend backend);
+
 /// Session and preprocessing options shared by every ofxYolo26 model.
 struct Settings {
-	/// Execution provider. The macOS build of onnxruntime shipped with
-	/// ofxOnnxRuntime is CPU-only, so INFER_CUDA / INFER_TENSORRT are for
-	/// platforms where you have swapped in a matching runtime.
-	ofxOnnxRuntime::InferType inferType = ofxOnnxRuntime::INFER_CPU;
+	/// Defaults to CoreML on Apple hardware, CPU elsewhere.
+	Backend backend = getDefaultBackend();
 	int deviceId = 0;
+
+	/// Fall back to the CPU provider, with a warning, when the requested
+	/// backend is unavailable rather than failing the load.
+	bool fallbackToCPU = true;
+
+	/// CoreML: which processors it may dispatch to.
+	CoreMLComputeUnits coreMLComputeUnits = CoreMLComputeUnits::All;
+
+	/// CoreML: use the newer MLProgram model format, which has better operator
+	/// coverage than the legacy NeuralNetwork format and so leaves less of the
+	/// graph falling back to CPU.
+	bool coreMLUseMLProgram = true;
+
+	/// CoreML: directory for compiled CoreML models, resolved with
+	/// ofToDataPath() and created if missing. CoreML compilation costs a second
+	/// or two per model; caching pays that once instead of on every launch.
+	/// Empty uses a temp directory that is discarded when the session closes.
+	///
+	/// The cache is keyed on the model path, and onnxruntime does not check
+	/// whether the file changed — clear this directory if you replace a model
+	/// without renaming it.
+	std::string coreMLCacheDirectory = "coreml-cache";
 
 	/// 0 leaves the onnxruntime default (one thread per physical core).
 	/// Lower this when running inference on a background thread so it does not

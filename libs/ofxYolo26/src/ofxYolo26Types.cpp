@@ -2,6 +2,26 @@
 
 namespace ofxYolo26 {
 
+Backend getDefaultBackend() {
+#if defined(__APPLE__)
+	// Present whenever the linked onnxruntime was built with the CoreML EP.
+	// Model::load() falls back to CPU if this build was not.
+	return Backend::CoreML;
+#else
+	return Backend::CPU;
+#endif
+}
+
+const char * toString(Backend backend) {
+	switch (backend) {
+	case Backend::CPU: return "CPU";
+	case Backend::CoreML: return "CoreML";
+	case Backend::CUDA: return "CUDA";
+	case Backend::TensorRT: return "TensorRT";
+	}
+	return "unknown";
+}
+
 Letterbox Letterbox::make(int srcW, int srcH, int dstW, int dstH, ResizeMode mode) {
 	Letterbox lb;
 	lb.srcWidth = srcW;

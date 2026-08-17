@@ -39,24 +39,28 @@ bool Model::load(const std::string & path, const Settings & s) {
 	if (settings.intraOpNumThreads > 0) sessionOptions.SetIntraOpNumThreads(settings.intraOpNumThreads);
 	if (settings.interOpNumThreads > 0) sessionOptions.SetInterOpNumThreads(settings.interOpNumThreads);
 
-	if (settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
-		OrtTensorRTProviderOptions op;
-		memset(&op, 0, sizeof(op));
-		op.device_id = settings.deviceId;
-		op.trt_fp16_enable = 1;
-		op.trt_engine_cache_enable = 1;
-		std::string cachePath = resolved;
-		ofStringReplace(cachePath, ".onnx", "_trt_cache");
-		op.trt_engine_cache_path = cachePath.c_str();
-		sessionOptions.AppendExecutionProvider_TensorRT(op);
-	}
-	if (settings.inferType == ofxOnnxRuntime::INFER_CUDA || settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
-		OrtCUDAProviderOptions op;
-		op.device_id = settings.deviceId;
-		sessionOptions.AppendExecutionProvider_CUDA(op);
-	}
-
 	try {
+		// Requesting a provider the runtime was not built with throws rather than
+		// falling back, so this has to sit inside the same guard as session
+		// creation. The onnxruntime that ships with ofxOnnxRuntime is CPU-only on
+		// macOS, so INFER_CUDA / INFER_TENSORRT will land here.
+		if (settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
+			OrtTensorRTProviderOptions op;
+			memset(&op, 0, sizeof(op));
+			op.device_id = settings.deviceId;
+			op.trt_fp16_enable = 1;
+			op.trt_engine_cache_enable = 1;
+			std::string cachePath = resolved;
+			ofStringReplace(cachePath, ".onnx", "_trt_cache");
+			op.trt_engine_cache_path = cachePath.c_str();
+			sessionOptions.AppendExecutionProvider_TensorRT(op);
+		}
+		if (settings.inferType == ofxOnnxRuntime::INFER_CUDA || settings.inferType == ofxOnnxRuntime::INFER_TENSORRT) {
+			OrtCUDAProviderOptions op;
+			op.device_id = settings.deviceId;
+			sessionOptions.AppendExecutionProvider_CUDA(op);
+		}
+
 		// BaseHandler::setup2 creates the session and sizes the input buffer from
 		// the model's declared input shape.
 		setup2(path, sessionOptions);

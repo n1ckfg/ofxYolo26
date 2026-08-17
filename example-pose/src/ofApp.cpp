@@ -126,6 +126,7 @@ void ofApp::draw() {
 	info += "   inference: " + ofToString(pose.getLastInferenceTimeMs(), 1) + " ms";
 	info += "   inference fps: " + ofToString(pose.getFps(), 1);
 	info += "   app fps: " + ofToString(ofGetFrameRate(), 1);
+	info += "   backend: " + std::string(ofxYolo26::toString(pose.getPose().getActiveBackend()));
 	info += "\nscore >= " + ofToString(scoreThreshold, 2)
 		+ "   keypoint >= " + ofToString(keypointThreshold, 2)
 		+ "   keypoints per pose: " + ofToString(result.numKeypoints);

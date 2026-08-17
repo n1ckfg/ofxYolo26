@@ -1,7 +1,8 @@
 # ofxYolo26 — build report
 
 Depth, pose and instance segmentation are all implemented, build, and are
-verified against the Python onnxruntime reference.
+verified against the Python onnxruntime reference. GPU/ANE acceleration is on
+by default via CoreML, worth 2.6x–9.3x.
 
 ## Structure
 
@@ -71,12 +72,63 @@ letterbox preprocessing.
 Residual differences are JPEG decoder noise (FreeImage vs libjpeg) plus that
 one-level preprocessing rounding.
 
-Per 640x640 inference on CPU: depth ~80 ms, pose ~35 ms, segmentation ~38 ms.
 All three examples launch, run, and shut their worker threads down cleanly.
 
-## One thing outside the addon
+## GPU acceleration (onnxruntime 1.29.0 + CoreML)
 
-The examples would not link. `ofxOnnxRuntime`'s `addon_config.mk` used
+onnxruntime has no Metal/MPS provider; the Apple path is CoreML. The bundled
+1.10.0 had no CoreML compiled in, so the runtime was replaced with 1.29.0 and
+a `Backend` / `CoreMLComputeUnits` option added, defaulting to CoreML with
+automatic CPU fallback.
+
+Median steady-state inference, 640x640:
+
+| task | CPU | CoreML | speedup |
+|---|---|---|---|
+| depth | 85.6 ms | 9.2 ms | 9.3x |
+| pose | 29.1 ms | 11.3 ms | 2.6x |
+| segmentation | 38.2 ms | 8.5 ms | 4.5x |
+
+Accuracy is not traded away: depth and segmentation agree with CPU to within
+1e-5, and pose keypoints land on the same pixel with a worst-case score
+difference of 4e-5.
+
+Four findings worth recording, none of them predictable from the docs:
+
+- **`CoreMLComputeUnits::All` beats Neural-Engine-only** — 5.6 ms vs 22.9 ms on
+  pose. Operators the ANE refuses fall back to CPU rather than to the GPU, so
+  pinning to the ANE is the worst accelerated option, not the best.
+- **The shipped `coreml_provider_factory.h` documents the wrong option values.**
+  It lists `MLComputeUnitsAll`; the runtime only accepts bare `ALL`, `CPUOnly`,
+  `CPUAndGPU`, `CPUAndNeuralEngine`. I probed the runtime for the accepted set
+  rather than trusting the header.
+- **CoreML compiles at first `Run`, not at session creation** — up to 1.9 s.
+  `coreMLCacheDirectory` persists the compiled model and cuts that to ~60 ms on
+  later launches. Warm the model up before feeding it live video.
+- **A quarantined dylib hangs the process silently.** A browser-downloaded
+  onnxruntime carries `com.apple.quarantine`; the app then sits at 0% CPU and
+  192 KB RSS forever, with no crash and no log. `cp` propagates it to every
+  `bin/` copy.
+
+Two platform regressions from the upgrade, both documented in the README: the
+1.29.0 macOS build is **arm64-only** (1.10.0 was universal) and requires
+**macOS 14+**.
+
+The CPU-fallback path proved itself during development — when the compute-units
+value was still wrong, both models loaded on CPU with a warning and produced
+correct results instead of failing.
+
+## Changes outside the addon
+
+`ofxOnnxRuntime` now carries onnxruntime 1.29.0 in place of 1.10.0, and two
+calls in `ofxOnnxRuntime.cpp` were updated: `GetInputName`/`GetOutputName`
+returned raw `char*` and were removed after 1.11 in favour of the `...Allocated`
+forms. Those return owning pointers, so the names are copied into members that
+outlive them — the old code leaked them, which is why the raw pointers stayed
+valid. The 1.10.0 tree and the original `.cpp` are backed up in `~/Downloads`.
+
+Separately, the examples would not link at all. `ofxOnnxRuntime`'s
+`addon_config.mk` used
 `-Xlinker -rpath -Xlinker @executable_path`, and openFrameworks runs addon
 LDFLAGS through `$(call uniq,...)` — which collapses the repeated `-Xlinker` and
 leaves `@executable_path` as a stray argument. Its own example ships only an

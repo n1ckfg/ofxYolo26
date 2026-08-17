@@ -3,6 +3,9 @@ reference/
 # ONNX model weights (20 MB+); copy them into bin/data/models/ yourself
 */bin/data/models/*.onnx
 
+# CoreML compiles models into here at first run
+*/bin/data/coreml-cache/
+
 #########################
 # general patterns
 #########################

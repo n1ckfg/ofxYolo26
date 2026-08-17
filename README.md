@@ -24,7 +24,13 @@ additions — their heads are already the simplest case of the pose decoder.
 
 ## Dependencies
 
-- [ofxOnnxRuntime](https://github.com/hanasaan/ofxOnnxRuntime)
+- [ofxOnnxRuntime](https://github.com/hanasaan/ofxOnnxRuntime), with its
+  bundled onnxruntime replaced by **1.29.0** — see Upgrading onnxruntime below.
+
+**Platform:** the onnxruntime 1.29.0 macOS build is **arm64 only** and requires
+**macOS 14+**. Apple Silicon, in other words. If you need Intel or an older
+macOS, stay on the 1.10.0 that ofxOnnxRuntime ships (universal, CPU-only) — the
+addon still builds against it apart from the two API calls noted below.
 
 ## Setup
 
@@ -73,6 +79,43 @@ ofxYolo26::drawPoses(poseThread.getPoseResult(), frameRect);
 
 Frames handed to `setInput()` while the worker is busy are dropped rather than
 queued, so results stay as close to live as the model allows.
+
+## Backends
+
+onnxruntime has no Metal or MPS execution provider; on Apple hardware the
+accelerated path is **CoreML**, which spreads the graph across the Neural
+Engine, GPU and CPU. It is the default here, and it is worth 2.6x–9.3x (see
+Performance below).
+
+```cpp
+ofxYolo26::Settings settings;
+settings.backend = ofxYolo26::Backend::CoreML;   // the default on macOS
+settings.coreMLComputeUnits = ofxYolo26::CoreMLComputeUnits::All;
+settings.fallbackToCPU = true;                   // the default
+
+depth.setup("models/yolo26n-depth.onnx", settings);
+depth.getActiveBackend();   // what you actually got
+```
+
+A few things worth knowing:
+
+- **Requesting an unavailable provider throws** rather than degrading, so the
+  loader catches it and retries on CPU with a warning. `getActiveBackend()`
+  reports what is actually running; set `fallbackToCPU = false` to fail loudly
+  instead.
+- **`CoreMLComputeUnits::All` is the fastest.** Restricting to the Neural
+  Engine is *slower* than letting CoreML choose — the operators the ANE will
+  not take fall back to CPU rather than to the GPU.
+- **The first inference is slow.** CoreML compiles the model on the first
+  `Run`, not at session creation: cold, that is 0.3–1.9 s depending on the
+  model. `Settings::coreMLCacheDirectory` (default `coreml-cache` in your data
+  folder) persists the compiled model, which cuts a cold first inference of
+  1.9 s to about 60 ms on later launches. Either way, run one throwaway frame
+  through the model during setup rather than letting a live source hit it.
+- The cache is keyed on the model path and onnxruntime does **not** notice if
+  the file changed — clear the directory if you replace a model in place.
+- `Backend::CUDA` and `Backend::TensorRT` are for platforms where you have
+  swapped in a runtime that supports them; the macOS build has neither.
 
 ## Coordinates and letterboxing
 
@@ -209,11 +252,20 @@ dump results to the console, and `h` to toggle the help line.
 
 ## Performance
 
-The onnxruntime build shipped with ofxOnnxRuntime is 1.10.0, CPU-only on macOS
-— it has no CoreML execution provider compiled in. On an Apple Silicon laptop,
-per 640x640 inference: depth ~80 ms, pose ~35 ms, segmentation ~38 ms. Hence
-the threaded runners. `Settings::inferType` exposes CUDA and TensorRT for
-platforms where you have swapped in a runtime that supports them.
+Median steady-state inference, 640x640, Apple Silicon laptop, onnxruntime
+1.29.0:
+
+| task | CPU | CoreML | speedup |
+|---|---|---|---|
+| depth | 85.6 ms | 9.2 ms | **9.3x** |
+| pose | 29.1 ms | 11.3 ms | **2.6x** |
+| segmentation | 38.2 ms | 8.5 ms | **4.5x** |
+
+That is roughly 12 → 109 fps for depth, 34 → 88 fps for pose, and 26 → 118 fps
+for segmentation. The threaded runners still matter — 9 ms on the render thread
+is a third of a 30 fps budget — but all three tasks now run comfortably live.
+
+Session load, with the CoreML cache warm, is about 40–55 ms per model.
 
 ## Verification
 
@@ -245,18 +297,66 @@ against Python's 59.4%.
 Remaining differences are JPEG decoder noise (FreeImage vs libjpeg) plus the
 one-level preprocessing rounding above.
 
+**CoreML vs CPU**, same addon, same inputs — the accelerated paths may compute
+at reduced precision, so this matters:
+
+| task | agreement |
+|---|---|
+| depth | mean and max \|diff\| below 1e-5 over all 409,600 pixels |
+| pose | same 11 detections; max score diff 4e-5; every keypoint on the same pixel |
+| segmentation | same 8 instances, identical classes; max score and mask-alpha diff below 1e-5 |
+
+In other words, the backend is a performance choice, not an accuracy trade-off,
+on these models.
+
+## Upgrading onnxruntime
+
+ofxOnnxRuntime ships onnxruntime 1.10.0, which is CPU-only on macOS — no CoreML
+provider is compiled in. Getting GPU/ANE acceleration means replacing it:
+
+1. Drop a current `onnxruntime-osx-arm64` release into
+   `ofxOnnxRuntime/libs/onnxruntime`: headers into `include/`, and the dylib
+   into `lib/osx/` named **`libonnxruntime.1.dylib`** (its `install_name` is
+   `@rpath/libonnxruntime.1.dylib`, so the filename has to match).
+
+2. **Strip the quarantine attribute**, or the app will hang on launch:
+
+   ```bash
+   xattr -d com.apple.quarantine libs/onnxruntime/lib/osx/libonnxruntime.1.dylib
+   ```
+
+   A browser-downloaded dylib carries `com.apple.quarantine`, and Gatekeeper
+   stalls the process at load — it does not crash or log, it just sits there at
+   0% CPU forever. `cp` propagates the attribute, so any copy already in a
+   `bin/` folder needs the same treatment.
+
+3. Patch two calls in `ofxOnnxRuntime.cpp` — `GetInputName`/`GetOutputName`
+   returned a raw `char*` and were removed after 1.11 in favour of
+   `GetInputNameAllocated`/`GetOutputNameAllocated`. The replacements return
+   owning pointers, so the names must be copied into storage that outlives
+   them; the old code leaked them, which is why it worked. Both changes are in
+   this repo's copy of the addon.
+
 ## Notes
 
 - Model paths are resolved with `ofToDataPath()`.
 - Class names come from the export's `names` ONNX metadata, so
   `detections[i].labelName` reads "person" rather than "0".
-- `example*/bin/data/models/*.onnx` is gitignored — the models are 10–20 MB each.
+- `example*/bin/data/models/*.onnx` and `example*/bin/data/coreml-cache/` are
+  gitignored — the models are 10–20 MB each and the cache is build output.
+- The `coreml_provider_factory.h` shipped with 1.29.0 documents `MLComputeUnits`
+  values as `MLComputeUnitsAll`, `MLComputeUnitsCPUOnly` and so on. **The
+  runtime rejects those.** The accepted values are the bare tokens `ALL`,
+  `CPUOnly`, `CPUAndGPU` and `CPUAndNeuralEngine`, case-sensitive.
 - ofxOnnxRuntime's `addon_config.mk` needed a fix to link under the openFrameworks
   makefiles: openFrameworks runs addon LDFLAGS through `$(call uniq,...)`, which
   collapsed the repeated `-Xlinker` in `-Xlinker -rpath -Xlinker @executable_path`
   and left `@executable_path` as a stray linker argument. It now uses the
   single-token `-Wl,-rpath,...` form, plus a second rpath for the makefile
   build's bundle layout.
+- Linking warns `building for macOS-11.0, but linking with dylib ... built for
+  newer version 14.0`. That is openFrameworks' deployment target versus the
+  runtime's; harmless as long as you are on macOS 14+.
 
 ## License
 

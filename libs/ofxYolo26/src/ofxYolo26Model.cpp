@@ -70,13 +70,16 @@ void Model::configureSessionOptions(Ort::SessionOptions & sessionOptions,
 }
 
 const char * Model::coreMLComputeUnitsString(CoreMLComputeUnits units) {
+	// Bare tokens, case-sensitive. The coreml_provider_factory.h shipped with
+	// onnxruntime 1.29 documents "MLComputeUnitsAll" and friends, but the
+	// runtime rejects those; only these four are accepted.
 	switch (units) {
-	case CoreMLComputeUnits::All: return "MLComputeUnitsAll";
-	case CoreMLComputeUnits::CPUAndNeuralEngine: return "MLComputeUnitsCPUAndNeuralEngine";
-	case CoreMLComputeUnits::CPUAndGPU: return "MLComputeUnitsCPUAndGPU";
-	case CoreMLComputeUnits::CPUOnly: return "MLComputeUnitsCPUOnly";
+	case CoreMLComputeUnits::All: return "ALL";
+	case CoreMLComputeUnits::CPUAndNeuralEngine: return "CPUAndNeuralEngine";
+	case CoreMLComputeUnits::CPUAndGPU: return "CPUAndGPU";
+	case CoreMLComputeUnits::CPUOnly: return "CPUOnly";
 	}
-	return "MLComputeUnitsAll";
+	return "ALL";
 }
 
 bool Model::load(const std::string & path, const Settings & s) {

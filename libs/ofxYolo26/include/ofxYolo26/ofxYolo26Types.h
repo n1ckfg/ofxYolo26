@@ -70,11 +70,25 @@ enum class Backend {
 	TensorRT
 };
 
-/// Which processors CoreML is allowed to use. `All` lets CoreML choose, which
-/// in practice means the Neural Engine for most of a YOLO graph.
+/// Which processors CoreML may dispatch to.
 ///
-/// Note that the Neural Engine computes in fp16. If you need results that match
-/// the CPU provider bit for bit, use CPUAndGPU or the CPU backend.
+/// `All` lets CoreML spread the graph across all of them and is the fastest by
+/// some margin — measured on yolo26n-pose, 640x640, Apple Silicon:
+///
+///     CPU backend           29.2 ms
+///     All                    5.6 ms
+///     CPUAndGPU              9.6 ms
+///     CPUAndNeuralEngine    22.9 ms
+///
+/// Restricting to the Neural Engine is *slower* than letting CoreML choose:
+/// the parts of a YOLO graph the ANE will not take fall back to CPU rather
+/// than to the GPU.
+///
+/// Accelerated paths may compute at reduced precision, but on these models the
+/// divergence from the CPU provider is negligible: depth and segmentation agree
+/// to within 1e-5, and pose scores differ by at most 4e-5 with keypoints landing
+/// on the same pixel. Use CPUOnly (or Backend::CPU) if you need a bit-exact
+/// match anyway.
 enum class CoreMLComputeUnits {
 	All,
 	CPUAndNeuralEngine,

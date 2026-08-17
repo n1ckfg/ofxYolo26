@@ -170,6 +170,7 @@ void ofApp::draw() {
 	info += "   inference: " + ofToString(depth.getLastInferenceTimeMs(), 1) + " ms";
 	info += "   inference fps: " + ofToString(depth.getFps(), 1);
 	info += "   app fps: " + ofToString(ofGetFrameRate(), 1);
+	info += "   backend: " + std::string(ofxYolo26::toString(depth.getDepth().getActiveBackend()));
 	info += "\ndepth range: " + ofToString(map.minValue, 4) + " .. " + ofToString(map.maxValue, 4);
 	info += "   map: " + ofToString(map.width) + "x" + ofToString(map.height);
 	info += "   content: " + ofToString(map.letterbox.contentWidth) + "x" + ofToString(map.letterbox.contentHeight);

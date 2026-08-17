@@ -197,6 +197,7 @@ void ofApp::draw() {
 	info += "   inference: " + ofToString(segmentation.getLastInferenceTimeMs(), 1) + " ms";
 	info += "   inference fps: " + ofToString(segmentation.getFps(), 1);
 	info += "   app fps: " + ofToString(ofGetFrameRate(), 1);
+	info += "   backend: " + std::string(ofxYolo26::toString(segmentation.getSegmentation().getActiveBackend()));
 	info += "\nview: " + std::string(viewName)
 		+ "   score >= " + ofToString(scoreThreshold, 2)
 		+ "   masks: " + ofToString(result.protoWidth) + "x" + ofToString(result.protoHeight)

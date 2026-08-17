@@ -118,6 +118,60 @@ void Model::readMetadata() {
 	} catch (const Ort::Exception & e) {
 		ofLogVerbose("ofxYolo26::Model") << "could not read model metadata: " << e.what();
 	}
+
+	parseClassNames();
+}
+
+void Model::parseClassNames() {
+	classNames.clear();
+
+	// Ultralytics writes a Python dict literal: {0: 'person', 1: 'bicycle', ...}.
+	// Keys are contiguous from zero in every export seen so far, but read the
+	// index rather than assuming it.
+	const std::string names = getMetadata("names");
+	if (names.empty()) return;
+
+	std::map<int, std::string> byIndex;
+	size_t pos = 0;
+	while (pos < names.size()) {
+		const size_t colon = names.find(':', pos);
+		if (colon == std::string::npos) break;
+
+		// Index is the run of digits immediately before the colon.
+		size_t digitEnd = colon;
+		while (digitEnd > pos && std::isspace((unsigned char)names[digitEnd - 1]))
+			digitEnd--;
+		size_t digitStart = digitEnd;
+		while (digitStart > pos && std::isdigit((unsigned char)names[digitStart - 1]))
+			digitStart--;
+		if (digitStart == digitEnd) {
+			pos = colon + 1;
+			continue;
+		}
+
+		const char quote = names.find('\'', colon) < names.find('"', colon) ? '\'' : '"';
+		const size_t open = names.find(quote, colon);
+		if (open == std::string::npos) break;
+		const size_t close = names.find(quote, open + 1);
+		if (close == std::string::npos) break;
+
+		byIndex[ofToInt(names.substr(digitStart, digitEnd - digitStart))]
+			= names.substr(open + 1, close - open - 1);
+		pos = close + 1;
+	}
+
+	if (byIndex.empty()) return;
+	classNames.resize(byIndex.rbegin()->first + 1);
+	for (const auto & entry : byIndex) {
+		classNames[entry.first] = entry.second;
+	}
+}
+
+std::string Model::getClassName(int label) const {
+	if (label < 0 || label >= int(classNames.size()) || classNames[label].empty()) {
+		return ofToString(label);
+	}
+	return classNames[label];
 }
 
 void Model::logModelInfo() const {

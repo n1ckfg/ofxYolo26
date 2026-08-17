@@ -35,6 +35,11 @@ public:
 	std::string getMetadata(const std::string & key) const;
 	const std::vector<std::string> & getMetadataKeys() const { return metadataKeys; }
 
+	/// Class names parsed from the "names" metadata entry, indexed by class id.
+	/// Empty when the export did not record them.
+	const std::vector<std::string> & getClassNames() const { return classNames; }
+	std::string getClassName(int label) const;
+
 	/// Wall-clock time of the last Session::Run, in milliseconds.
 	float getLastInferenceTimeMs() const { return lastInferenceMs; }
 
@@ -72,9 +77,11 @@ protected:
 
 	std::vector<std::string> metadataKeys;
 	std::map<std::string, std::string> metadataMap;
+	std::vector<std::string> classNames;
 
 private:
 	void readMetadata();
+	void parseClassNames();
 	void logModelInfo() const;
 };
 

@@ -1,5 +1,8 @@
 reference/
 
+# ONNX model weights (20 MB+); copy them into bin/data/models/ yourself
+*/bin/data/models/*.onnx
+
 #########################
 # general patterns
 #########################

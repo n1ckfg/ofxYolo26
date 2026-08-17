@@ -24,7 +24,7 @@ meta:
 common:
 	# dependencies with other addons, a list of them separated by spaces 
 	# or use += in several lines
-	# ADDON_DEPENDENCIES =
+	ADDON_DEPENDENCIES = ofxOnnxRuntime
 	
 	ADDON_INCLUDES = src
 	ADDON_INCLUDES += libs/ofxYolo26/include
